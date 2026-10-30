@@ -5,8 +5,9 @@
   "main": "index.js",
   "scripts": {
     "test": "playwright test",
-    "test:vacancy": "playwright test tests/e2e/recruitment/vacancy.spec.ts --project=chromium",
-    "test:candidate": "playwright test tests/e2e/recruitment/23130179_NguyenNhutLong_ASM7_candidate_management.spec.ts --project=chromium",
+    "test:vacancy": "playwright test tests/e2e/recruitment/23130179_NguyenNhutLong_vacancy.spec.ts --project=chromium",
+    "test:candidate": "playwright test tests/e2e/recruitment/23130179_NguyenNhutLong_candidate_management.spec.ts --project=chromium",
+    "test:workflow": "playwright test tests/e2e/recruitment/23130179_NguyenNhutLong_candidate_workflow.spec.ts --project=chromium",
     "test:headed": "playwright test --headed",
     "report": "playwright show-report"
   },
