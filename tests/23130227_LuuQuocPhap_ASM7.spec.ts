@@ -8,7 +8,7 @@
  *  [Employee-List-1]  to [Employee-List-40]
  */
 
-import { test, expect, type Page, type Locator } from '@playwright/test';
+import { test, expect, type Page, type Locator, type Response } from '@playwright/test';
 
 // ==========================================
 // CONFIGURATION & CONSTANTS
@@ -50,6 +50,30 @@ async function gotoEmployeeList(page: Page): Promise<void> {
 }
 
 /**
+ * True only for the real employee grid request (search / reset / sort / page).
+ * Autocomplete hints also call /api/v2/pim/employees but without "limit=",
+ * so they must not be mistaken for the table request (otherwise we can click
+ * Reset while the Search request is still in flight and get stale data).
+ */
+function isEmployeeListRequest(response: Response): boolean {
+  const url = response.url();
+  return url.includes('/api/v2/pim/employees') &&
+    url.includes('limit=') &&
+    response.status() === 200;
+}
+
+/**
+ * Wait until the table finishes loading and renders its results.
+ */
+async function waitForTableUpdate(page: Page): Promise<void> {
+  // The grid shows a loading spinner while a request is in flight.
+  await page.locator('.oxd-loading-spinner').first()
+    .waitFor({ state: 'detached', timeout: 15000 })
+    .catch(() => {});
+  await waitForResults(page);
+}
+
+/**
  * Wait for employee list table grid or 'No Records Found' indicator.
  */
 async function waitForResults(page: Page): Promise<void> {
@@ -59,7 +83,7 @@ async function waitForResults(page: Page): Promise<void> {
     .or(page.locator('.orangehrm-horizontal-padding .oxd-text--span').first())
     .or(page.locator('.oxd-table'));
 
-  await expect(target.first()).toBeVisible({ timeout: 15000 });
+  await expect(target.first()).toBeVisible({ timeout: 20000 });
 }
 
 /**
@@ -79,7 +103,7 @@ async function selectDropdown(page: Page, label: string, optionText: string): Pr
   await page.waitForTimeout(300);
 
   const dropdown = page.locator('.oxd-select-dropdown');
-  await expect(dropdown).toBeVisible({ timeout: 5000 });
+  await expect(dropdown).toBeVisible({ timeout: 10000 });
 
   const option = dropdown.locator('[role="option"]').filter({ hasText: optionText }).first();
   await option.click();
@@ -98,7 +122,7 @@ async function fillAutocomplete(page: Page, label: string, hint: string, selectI
   await expect(dropdown).toBeVisible({ timeout: 10000 });
 
   const validOptions = dropdown.locator('.oxd-autocomplete-option').filter({ hasNotText: 'Searching' });
-  await expect(validOptions.first()).toBeVisible({ timeout: 8000 });
+  await expect(validOptions.first()).toBeVisible({ timeout: 15000 });
 
   const chosenOption = validOptions.nth(selectIndex);
   const chosenText = (await chosenOption.innerText()).trim();
@@ -112,14 +136,14 @@ async function fillAutocomplete(page: Page, label: string, hint: string, selectI
  */
 async function clickSearch(page: Page): Promise<void> {
   const searchBtn = page.getByRole('button', { name: 'Search' });
-  const responsePromise = page.waitForResponse(response => 
-    response.url().includes('/api/v2/pim/employees'),
-    { timeout: 15000 }
+  const responsePromise = page.waitForResponse(
+    response => isEmployeeListRequest(response),
+    { timeout: 20000 }
   ).catch(() => null);
 
   await searchBtn.click();
   await responsePromise;
-  await waitForResults(page);
+  await waitForTableUpdate(page);
 }
 
 /**
@@ -127,15 +151,14 @@ async function clickSearch(page: Page): Promise<void> {
  */
 async function clickReset(page: Page): Promise<void> {
   const resetBtn = page.getByRole('button', { name: 'Reset' });
-  const responsePromise = page.waitForResponse(response => 
-    response.url().includes('/api/v2/pim/employees') && response.status() === 200,
-    { timeout: 15000 }
+  const responsePromise = page.waitForResponse(
+    response => isEmployeeListRequest(response),
+    { timeout: 20000 }
   ).catch(() => null);
 
   await resetBtn.click();
   await responsePromise;
-  await page.waitForLoadState('networkidle');
-  await waitForResults(page);
+  await waitForTableUpdate(page);
 }
 
 /**
@@ -147,18 +170,17 @@ async function sortColumn(page: Page, columnName: string, order: 'Ascending' | '
   await sortIcon.click();
 
   const sortDropdown = headerCell.locator('.oxd-table-header-sort-dropdown');
-  await expect(sortDropdown).toBeVisible({ timeout: 5000 });
+  await expect(sortDropdown).toBeVisible({ timeout: 10000 });
 
-  const responsePromise = page.waitForResponse(response => 
-    response.url().includes('/api/v2/pim/employees') && response.status() === 200,
-    { timeout: 15000 }
+  const responsePromise = page.waitForResponse(
+    response => isEmployeeListRequest(response),
+    { timeout: 20000 }
   ).catch(() => null);
 
   const orderItem = sortDropdown.locator('.oxd-table-header-sort-dropdown-item', { hasText: order });
   await orderItem.click();
   await responsePromise;
-  await page.waitForLoadState('networkidle');
-  await waitForResults(page);
+  await waitForTableUpdate(page);
 }
 
 /**
@@ -195,7 +217,7 @@ async function safeDeleteEmployeeById(page: Page, empId: string): Promise<void> 
     if (await row.isVisible({ timeout: 3000 })) {
       await row.locator('.bi-trash').locator('..').click();
       const modal = page.locator('.oxd-dialog-sheet');
-      await expect(modal).toBeVisible({ timeout: 5000 });
+      await expect(modal).toBeVisible({ timeout: 10000 });
       await modal.getByRole('button', { name: 'Yes, Delete' }).click();
       await page.waitForLoadState('networkidle');
     }
@@ -211,7 +233,7 @@ async function safeDeleteEmployeeById(page: Page, empId: string): Promise<void> 
 test.describe.configure({ mode: 'serial' });
 
 test.describe('Group 09 - 23130227 - Luu Quoc Phap - PIM: List Employees Test Suite', () => {
-  test.setTimeout(90000);
+  test.setTimeout(120000);
 
   test.beforeEach(async ({ page }) => {
     await login(page);
@@ -235,7 +257,7 @@ test.describe('Group 09 - 23130227 - Luu Quoc Phap - PIM: List Employees Test Su
     await expect(page.getByText('Employee Information')).toBeVisible();
     await expect(page.getByRole('button', { name: 'Search' })).toBeVisible();
     await expect(page.getByRole('button', { name: 'Reset' })).toBeVisible();
-    await expect(page.locator('.oxd-table')).toBeVisible();
+    await expect(page.locator('.oxd-table')).toBeVisible({ timeout: 15000 });
   });
 
   // --------------------------------------------------------------------------
@@ -246,7 +268,7 @@ test.describe('Group 09 - 23130227 - Luu Quoc Phap - PIM: List Employees Test Su
 
     // Step 2: Observe record counter label above table grid
     const counter = page.locator('.orangehrm-horizontal-padding .oxd-text--span').first();
-    await expect(counter).toBeVisible();
+    await expect(counter).toBeVisible({ timeout: 20000 });
 
     // Expected: Label displays "(X) Records Found" matching records
     const text = await counter.innerText();
@@ -261,11 +283,11 @@ test.describe('Group 09 - 23130227 - Luu Quoc Phap - PIM: List Employees Test Su
 
     // Step 2: Verify default value in [Include] dropdown field
     const includeSelect = getGroup(page, 'Include').locator('.oxd-select-text');
-    await expect(includeSelect).toContainText('Current Employees Only');
+    await expect(includeSelect).toContainText('Current Employees Only', { timeout: 15000 });
 
     // Step 3: Check records displayed in table grid
     const rows = page.locator('.oxd-table-card');
-    await expect(rows.first()).toBeVisible();
+    await expect(rows.first()).toBeVisible({ timeout: 15000 });
   });
 
   // --------------------------------------------------------------------------
@@ -302,13 +324,13 @@ test.describe('Group 09 - 23130227 - Luu Quoc Phap - PIM: List Employees Test Su
     // Step 1: Inspect textboxes [Employee Name], [Employee Id], [Supervisor Name]
     await expect(getGroup(page, 'Employee Name').locator('input')).toHaveAttribute('placeholder', 'Type for hints...');
     await expect(getGroup(page, 'Supervisor Name').locator('input')).toHaveAttribute('placeholder', 'Type for hints...');
-    await expect(getGroup(page, 'Employee Id').locator('input')).toHaveValue('');
+    await expect(getGroup(page, 'Employee Id').locator('input')).toHaveValue('', { timeout: 15000 });
 
     // Step 2: Inspect dropdowns
-    await expect(getGroup(page, 'Employment Status').locator('.oxd-select-text')).toContainText('-- Select --');
-    await expect(getGroup(page, 'Job Title').locator('.oxd-select-text')).toContainText('-- Select --');
-    await expect(getGroup(page, 'Sub Unit').locator('.oxd-select-text')).toContainText('-- Select --');
-    await expect(getGroup(page, 'Include').locator('.oxd-select-text')).toContainText('Current Employees Only');
+    await expect(getGroup(page, 'Employment Status').locator('.oxd-select-text')).toContainText('-- Select --', { timeout: 15000 });
+    await expect(getGroup(page, 'Job Title').locator('.oxd-select-text')).toContainText('-- Select --', { timeout: 15000 });
+    await expect(getGroup(page, 'Sub Unit').locator('.oxd-select-text')).toContainText('-- Select --', { timeout: 15000 });
+    await expect(getGroup(page, 'Include').locator('.oxd-select-text')).toContainText('Current Employees Only', { timeout: 15000 });
   });
 
   // --------------------------------------------------------------------------
@@ -368,10 +390,9 @@ test.describe('Group 09 - 23130227 - Luu Quoc Phap - PIM: List Employees Test Su
 
     // Expected: Table filters and shows matching record
     const rows = page.locator('.oxd-table-card');
-    await expect(rows.first()).toBeVisible();
-    const tableText = await page.locator('.oxd-table-body').innerText();
+    await expect(rows.first()).toBeVisible({ timeout: 15000 });
     const firstNamePart = selectedName.split(' ')[0];
-    expect(tableText).toContain(firstNamePart);
+    await expect(page.locator('.oxd-table-body')).toContainText(firstNamePart, { timeout: 15000 });
   });
 
   // --------------------------------------------------------------------------
@@ -390,7 +411,7 @@ test.describe('Group 09 - 23130227 - Luu Quoc Phap - PIM: List Employees Test Su
     expect(inputVal.replace(/\s+/g, ' ').trim()).toBe(selectedName.replace(/\s+/g, ' ').trim());
 
     const rows = page.locator('.oxd-table-card');
-    await expect(rows.first()).toBeVisible();
+    await expect(rows.first()).toBeVisible({ timeout: 15000 });
   });
 
   // --------------------------------------------------------------------------
@@ -400,17 +421,26 @@ test.describe('Group 09 - 23130227 - Luu Quoc Phap - PIM: List Employees Test Su
     await gotoEmployeeList(page);
 
     const nameInput = getGroup(page, 'Employee Name').locator('input');
+
+    // Wait for the autocomplete API call to finish before checking the hint popup,
+    // so a slow response ("Searching...") is not mistaken for a failed assertion.
+    const autocompleteResponse = page.waitForResponse(
+      response => response.url().includes('/api/v2/pim/employees') && response.status() === 200,
+      { timeout: 20000 }
+    ).catch(() => null);
+
     await nameInput.fill('NonExistent999');
+    await autocompleteResponse;
 
     // Autocomplete hint popup shows "No Records Found"
     const dropdown = page.locator('.oxd-autocomplete-dropdown');
-    await expect(dropdown).toBeVisible({ timeout: 8000 });
-    await expect(dropdown).toContainText('No Records Found');
+    await expect(dropdown).toBeVisible({ timeout: 15000 });
+    await expect(dropdown).toContainText('No Records Found', { timeout: 15000 });
 
     const searchBtn = page.getByRole('button', { name: 'Search' });
-    const responsePromise = page.waitForResponse(response => 
-      response.url().includes('/api/v2/pim/employees'),
-      { timeout: 15000 }
+    const responsePromise = page.waitForResponse(
+      response => isEmployeeListRequest(response),
+      { timeout: 20000 }
     ).catch(() => null);
 
     await searchBtn.click();
@@ -421,8 +451,8 @@ test.describe('Group 09 - 23130227 - Luu Quoc Phap - PIM: List Employees Test Su
     const noRecords = page.getByText('No Records Found');
     const emptyCards = page.locator('.oxd-table-card');
 
-    await expect(toast.or(noRecords).first()).toBeVisible({ timeout: 8000 });
-    expect(await emptyCards.count()).toBe(0);
+    await expect(toast.or(noRecords).first()).toBeVisible({ timeout: 15000 });
+    await expect(emptyCards).toHaveCount(0, { timeout: 15000 });
   });
 
   // --------------------------------------------------------------------------
@@ -441,7 +471,7 @@ test.describe('Group 09 - 23130227 - Luu Quoc Phap - PIM: List Employees Test Su
 
     // Expected: Table grid displays exact matching employee record with that Id
     const resultRow = page.locator('.oxd-table-card').filter({ hasText: firstRowId }).first();
-    await expect(resultRow).toBeVisible();
+    await expect(resultRow).toBeVisible({ timeout: 15000 });
   });
 
   // --------------------------------------------------------------------------
@@ -454,9 +484,9 @@ test.describe('Group 09 - 23130227 - Luu Quoc Phap - PIM: List Employees Test Su
     await idInput.fill('EMP99999');
 
     const searchBtn = page.getByRole('button', { name: 'Search' });
-    const responsePromise = page.waitForResponse(response => 
-      response.url().includes('/api/v2/pim/employees'),
-      { timeout: 15000 }
+    const responsePromise = page.waitForResponse(
+      response => isEmployeeListRequest(response),
+      { timeout: 20000 }
     ).catch(() => null);
 
     await searchBtn.click();
@@ -467,8 +497,8 @@ test.describe('Group 09 - 23130227 - Luu Quoc Phap - PIM: List Employees Test Su
     const noRecords = page.getByText('No Records Found');
     const emptyCards = page.locator('.oxd-table-card');
 
-    await expect(toast.or(noRecords).first()).toBeVisible({ timeout: 8000 });
-    expect(await emptyCards.count()).toBe(0);
+    await expect(toast.or(noRecords).first()).toBeVisible({ timeout: 15000 });
+    await expect(emptyCards).toHaveCount(0, { timeout: 15000 });
   });
 
   // --------------------------------------------------------------------------
@@ -491,7 +521,7 @@ test.describe('Group 09 - 23130227 - Luu Quoc Phap - PIM: List Employees Test Su
         }
       }
     } else {
-      await expect(page.getByText('No Records Found').or(page.locator('.oxd-toast'))).toBeVisible();
+      await expect(page.getByText('No Records Found').or(page.locator('.oxd-toast'))).toBeVisible({ timeout: 15000 });
     }
   });
 
@@ -505,9 +535,9 @@ test.describe('Group 09 - 23130227 - Luu Quoc Phap - PIM: List Employees Test Su
     await clickSearch(page);
 
     // Expected: Table displays current active employees
-    await expect(page.locator('.oxd-table-card').first()).toBeVisible();
+    await expect(page.locator('.oxd-table-card').first()).toBeVisible({ timeout: 15000 });
     const counter = page.locator('.orangehrm-horizontal-padding .oxd-text--span').first();
-    await expect(counter).toContainText('Records Found');
+    await expect(counter).toContainText('Records Found', { timeout: 15000 });
   });
 
   // --------------------------------------------------------------------------
@@ -522,7 +552,7 @@ test.describe('Group 09 - 23130227 - Luu Quoc Phap - PIM: List Employees Test Su
     // Expected: Filter applies, shows past employees or "No Records Found" toast
     const counter = page.locator('.orangehrm-horizontal-padding .oxd-text--span').first();
     const noRecordsToast = page.getByText('No Records Found');
-    await expect(counter.or(noRecordsToast).first()).toBeVisible();
+    await expect(counter.or(noRecordsToast).first()).toBeVisible({ timeout: 15000 });
   });
 
   // --------------------------------------------------------------------------
@@ -535,9 +565,9 @@ test.describe('Group 09 - 23130227 - Luu Quoc Phap - PIM: List Employees Test Su
     await clickSearch(page);
 
     // Expected: Table displays all records (both active and past)
-    await expect(page.locator('.oxd-table-card').first()).toBeVisible();
+    await expect(page.locator('.oxd-table-card').first()).toBeVisible({ timeout: 15000 });
     const counter = page.locator('.orangehrm-horizontal-padding .oxd-text--span').first();
-    await expect(counter).toContainText('Records Found');
+    await expect(counter).toContainText('Records Found', { timeout: 15000 });
   });
 
   // --------------------------------------------------------------------------
@@ -552,12 +582,12 @@ test.describe('Group 09 - 23130227 - Luu Quoc Phap - PIM: List Employees Test Su
 
     const dropdown = page.locator('.oxd-autocomplete-dropdown');
     try {
-      await expect(dropdown).toBeVisible({ timeout: 6000 });
+      await expect(dropdown).toBeVisible({ timeout: 10000 });
       const option = dropdown.locator('.oxd-autocomplete-option').filter({ hasNotText: 'Searching' }).first();
       if (await option.isVisible({ timeout: 4000 })) {
         await option.click();
         await clickSearch(page);
-        await expect(page.locator('.oxd-table')).toBeVisible();
+        await expect(page.locator('.oxd-table')).toBeVisible({ timeout: 15000 });
       }
     } catch {
       // If no supervisor in DB, verify input accepts text
@@ -585,7 +615,7 @@ test.describe('Group 09 - 23130227 - Luu Quoc Phap - PIM: List Employees Test Su
     await clickSearch(page);
 
     // Expected: Table updates to show filtered employees
-    await expect(page.locator('.oxd-table')).toBeVisible();
+    await expect(page.locator('.oxd-table')).toBeVisible({ timeout: 15000 });
   });
 
   // --------------------------------------------------------------------------
@@ -606,7 +636,7 @@ test.describe('Group 09 - 23130227 - Luu Quoc Phap - PIM: List Employees Test Su
     await clickSearch(page);
 
     // Expected: Table displays filtered results
-    await expect(page.locator('.oxd-table')).toBeVisible();
+    await expect(page.locator('.oxd-table')).toBeVisible({ timeout: 15000 });
   });
 
   // --------------------------------------------------------------------------
@@ -628,7 +658,7 @@ test.describe('Group 09 - 23130227 - Luu Quoc Phap - PIM: List Employees Test Su
     await clickSearch(page);
 
     // Expected: Multi-criteria search executed without system errors
-    await expect(page.locator('.oxd-table')).toBeVisible();
+    await expect(page.locator('.oxd-table')).toBeVisible({ timeout: 15000 });
   });
 
   // --------------------------------------------------------------------------
@@ -646,10 +676,10 @@ test.describe('Group 09 - 23130227 - Luu Quoc Phap - PIM: List Employees Test Su
     await clickReset(page);
 
     // Expected: All inputs cleared, dropdowns revert to default, table reloads
-    await expect(getGroup(page, 'Employee Name').locator('input')).toHaveValue('');
-    await expect(getGroup(page, 'Employment Status').locator('.oxd-select-text')).toContainText('-- Select --');
-    await expect(getGroup(page, 'Include').locator('.oxd-select-text')).toContainText('Current Employees Only');
-    await expect(page.locator('.oxd-table-card').first()).toBeVisible();
+    await expect(getGroup(page, 'Employee Name').locator('input')).toHaveValue('', { timeout: 15000 });
+    await expect(getGroup(page, 'Employment Status').locator('.oxd-select-text')).toContainText('-- Select --', { timeout: 15000 });
+    await expect(getGroup(page, 'Include').locator('.oxd-select-text')).toContainText('Current Employees Only', { timeout: 15000 });
+    await expect(page.locator('.oxd-table-card').first()).toBeVisible({ timeout: 15000 });
   });
 
   // --------------------------------------------------------------------------
@@ -667,7 +697,7 @@ test.describe('Group 09 - 23130227 - Luu Quoc Phap - PIM: List Employees Test Su
     // Type 2nd char ("Ki")
     await nameInput.fill('Ki');
     const dropdown = page.locator('.oxd-autocomplete-dropdown');
-    await expect(dropdown).toBeVisible({ timeout: 8000 });
+    await expect(dropdown).toBeVisible({ timeout: 15000 });
   });
 
   // --------------------------------------------------------------------------
@@ -705,9 +735,9 @@ test.describe('Group 09 - 23130227 - Luu Quoc Phap - PIM: List Employees Test Su
     await idInput.fill("' OR '1'='1");
 
     const searchBtn = page.getByRole('button', { name: 'Search' });
-    const responsePromise = page.waitForResponse(response => 
-      response.url().includes('/api/v2/pim/employees'),
-      { timeout: 15000 }
+    const responsePromise = page.waitForResponse(
+      response => isEmployeeListRequest(response),
+      { timeout: 20000 }
     ).catch(() => null);
 
     await searchBtn.click();
@@ -719,8 +749,8 @@ test.describe('Group 09 - 23130227 - Luu Quoc Phap - PIM: List Employees Test Su
     const noRecords = page.getByText('No Records Found');
     const emptyCards = page.locator('.oxd-table-card');
 
-    await expect(toast.or(noRecords).first()).toBeVisible({ timeout: 8000 });
-    expect(await emptyCards.count()).toBe(0);
+    await expect(toast.or(noRecords).first()).toBeVisible({ timeout: 15000 });
+    await expect(emptyCards).toHaveCount(0, { timeout: 15000 });
   });
 
   // --------------------------------------------------------------------------
@@ -749,10 +779,10 @@ test.describe('Group 09 - 23130227 - Luu Quoc Phap - PIM: List Employees Test Su
     await gotoEmployeeList(page);
 
     await sortColumn(page, 'First (& Middle) Name', 'Ascending');
-    await expect(page.locator('.oxd-table-card').first()).toBeVisible();
+    await expect(page.locator('.oxd-table-card').first()).toBeVisible({ timeout: 15000 });
 
     await sortColumn(page, 'First (& Middle) Name', 'Descending');
-    await expect(page.locator('.oxd-table-card').first()).toBeVisible();
+    await expect(page.locator('.oxd-table-card').first()).toBeVisible({ timeout: 15000 });
   });
 
   // --------------------------------------------------------------------------
@@ -762,10 +792,10 @@ test.describe('Group 09 - 23130227 - Luu Quoc Phap - PIM: List Employees Test Su
     await gotoEmployeeList(page);
 
     await sortColumn(page, 'Last Name', 'Ascending');
-    await expect(page.locator('.oxd-table-card').first()).toBeVisible();
+    await expect(page.locator('.oxd-table-card').first()).toBeVisible({ timeout: 15000 });
 
     await sortColumn(page, 'Last Name', 'Descending');
-    await expect(page.locator('.oxd-table-card').first()).toBeVisible();
+    await expect(page.locator('.oxd-table-card').first()).toBeVisible({ timeout: 15000 });
   });
 
   // --------------------------------------------------------------------------
@@ -775,10 +805,10 @@ test.describe('Group 09 - 23130227 - Luu Quoc Phap - PIM: List Employees Test Su
     await gotoEmployeeList(page);
 
     await sortColumn(page, 'Job Title', 'Ascending');
-    await expect(page.locator('.oxd-table-card').first()).toBeVisible();
+    await expect(page.locator('.oxd-table-card').first()).toBeVisible({ timeout: 15000 });
 
     await sortColumn(page, 'Job Title', 'Descending');
-    await expect(page.locator('.oxd-table-card').first()).toBeVisible();
+    await expect(page.locator('.oxd-table-card').first()).toBeVisible({ timeout: 15000 });
   });
 
   // --------------------------------------------------------------------------
@@ -788,10 +818,10 @@ test.describe('Group 09 - 23130227 - Luu Quoc Phap - PIM: List Employees Test Su
     await gotoEmployeeList(page);
 
     await sortColumn(page, 'Employment Status', 'Ascending');
-    await expect(page.locator('.oxd-table-card').first()).toBeVisible();
+    await expect(page.locator('.oxd-table-card').first()).toBeVisible({ timeout: 15000 });
 
     await sortColumn(page, 'Employment Status', 'Descending');
-    await expect(page.locator('.oxd-table-card').first()).toBeVisible();
+    await expect(page.locator('.oxd-table-card').first()).toBeVisible({ timeout: 15000 });
   });
 
   // --------------------------------------------------------------------------
@@ -801,10 +831,10 @@ test.describe('Group 09 - 23130227 - Luu Quoc Phap - PIM: List Employees Test Su
     await gotoEmployeeList(page);
 
     await sortColumn(page, 'Sub Unit', 'Ascending');
-    await expect(page.locator('.oxd-table-card').first()).toBeVisible();
+    await expect(page.locator('.oxd-table-card').first()).toBeVisible({ timeout: 15000 });
 
     await sortColumn(page, 'Sub Unit', 'Descending');
-    await expect(page.locator('.oxd-table-card').first()).toBeVisible();
+    await expect(page.locator('.oxd-table-card').first()).toBeVisible({ timeout: 15000 });
   });
 
   // --------------------------------------------------------------------------
@@ -814,10 +844,10 @@ test.describe('Group 09 - 23130227 - Luu Quoc Phap - PIM: List Employees Test Su
     await gotoEmployeeList(page);
 
     await sortColumn(page, 'Supervisor', 'Ascending');
-    await expect(page.locator('.oxd-table-card').first()).toBeVisible();
+    await expect(page.locator('.oxd-table-card').first()).toBeVisible({ timeout: 15000 });
 
     await sortColumn(page, 'Supervisor', 'Descending');
-    await expect(page.locator('.oxd-table-card').first()).toBeVisible();
+    await expect(page.locator('.oxd-table-card').first()).toBeVisible({ timeout: 15000 });
   });
 
   // --------------------------------------------------------------------------
@@ -827,7 +857,7 @@ test.describe('Group 09 - 23130227 - Luu Quoc Phap - PIM: List Employees Test Su
     await gotoEmployeeList(page);
 
     const paginationNav = page.locator('nav[aria-label="Pagination Navigation"]');
-    if (await paginationNav.isVisible({ timeout: 5000 })) {
+    if (await paginationNav.isVisible({ timeout: 10000 })) {
       // Step 1: Click page [2]
       const page2Btn = paginationNav.locator('.oxd-pagination-page-item--page', { hasText: '2' });
       await page2Btn.click();
@@ -835,7 +865,7 @@ test.describe('Group 09 - 23130227 - Luu Quoc Phap - PIM: List Employees Test Su
 
       // Verify page 2 is active
       const activePage = paginationNav.locator('.oxd-pagination-page-item--page-selected');
-      await expect(activePage).toHaveText('2');
+      await expect(activePage).toHaveText('2', { timeout: 15000 });
 
       // Step 2: Click page [1]
       const page1Btn = paginationNav.locator('.oxd-pagination-page-item--page', { hasText: '1' });
@@ -843,7 +873,7 @@ test.describe('Group 09 - 23130227 - Luu Quoc Phap - PIM: List Employees Test Su
       await waitForResults(page);
 
       // Verify page 1 is re-displayed
-      await expect(paginationNav.locator('.oxd-pagination-page-item--page-selected')).toHaveText('1');
+      await expect(paginationNav.locator('.oxd-pagination-page-item--page-selected')).toHaveText('1', { timeout: 15000 });
     }
   });
 
@@ -854,7 +884,7 @@ test.describe('Group 09 - 23130227 - Luu Quoc Phap - PIM: List Employees Test Su
     await gotoEmployeeList(page);
 
     const paginationNav = page.locator('nav[aria-label="Pagination Navigation"]');
-    if (await paginationNav.isVisible({ timeout: 5000 })) {
+    if (await paginationNav.isVisible({ timeout: 10000 })) {
       // Navigate to page 2
       await paginationNav.locator('.oxd-pagination-page-item--page', { hasText: '2' }).click();
       await waitForResults(page);
@@ -879,7 +909,7 @@ test.describe('Group 09 - 23130227 - Luu Quoc Phap - PIM: List Employees Test Su
     await addBtn.click();
 
     // Expected: System navigates to Add Employee screen displaying inputs and Save button
-    await expect(page).toHaveURL(/pim\/addEmployee/);
+    await expect(page).toHaveURL(/pim\/addEmployee/, { timeout: 15000 });
     await expect(page.getByPlaceholder('First Name')).toBeVisible();
     await expect(page.getByPlaceholder('Last Name')).toBeVisible();
     await expect(page.getByRole('button', { name: 'Save' })).toBeVisible();
@@ -898,7 +928,7 @@ test.describe('Group 09 - 23130227 - Luu Quoc Phap - PIM: List Employees Test Su
 
     // Expected: System navigates to Personal Details page
     await expect(page).toHaveURL(/pim\/viewPersonalDetails\/empNumber\/\d+/, { timeout: 20000 });
-    await expect(page.getByRole('heading', { name: 'Personal Details' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Personal Details' })).toBeVisible({ timeout: 15000 });
   });
 
   // --------------------------------------------------------------------------
@@ -914,7 +944,7 @@ test.describe('Group 09 - 23130227 - Luu Quoc Phap - PIM: List Employees Test Su
 
     // Expected: Confirmation modal displays "Are you Sure?" with "Yes, Delete" and "No, Cancel"
     const modal = page.locator('.oxd-dialog-sheet');
-    await expect(modal).toBeVisible();
+    await expect(modal).toBeVisible({ timeout: 15000 });
     await expect(modal).toContainText('Are you Sure?');
     await expect(modal.getByRole('button', { name: 'Yes, Delete' })).toBeVisible();
     await expect(modal.getByRole('button', { name: 'No, Cancel' })).toBeVisible();
@@ -939,19 +969,19 @@ test.describe('Group 09 - 23130227 - Luu Quoc Phap - PIM: List Employees Test Su
     await clickSearch(page);
 
     const targetRow = page.locator('.oxd-table-card').filter({ hasText: testId }).first();
-    await expect(targetRow).toBeVisible();
+    await expect(targetRow).toBeVisible({ timeout: 15000 });
 
     // Click Trash icon
     await targetRow.locator('.bi-trash').locator('..').click();
 
     // Confirm Delete
     const modal = page.locator('.oxd-dialog-sheet');
-    await expect(modal).toBeVisible();
+    await expect(modal).toBeVisible({ timeout: 15000 });
     await modal.getByRole('button', { name: 'Yes, Delete' }).click();
 
     // Expected: Toast message "Successfully Deleted" appears and row removed
     const toast = page.locator('.oxd-toast');
-    await expect(toast).toContainText(/Successfully Deleted/i, { timeout: 10000 });
+    await expect(toast).toContainText(/Successfully Deleted/i, { timeout: 15000 });
   });
 
   // --------------------------------------------------------------------------
@@ -970,19 +1000,19 @@ test.describe('Group 09 - 23130227 - Luu Quoc Phap - PIM: List Employees Test Su
       await clickSearch(page);
 
       const targetRow = page.locator('.oxd-table-card').filter({ hasText: testId }).first();
-      await expect(targetRow).toBeVisible();
+      await expect(targetRow).toBeVisible({ timeout: 15000 });
 
       // Click Trash icon
       await targetRow.locator('.bi-trash').locator('..').click();
 
       // Click "No, Cancel"
       const modal = page.locator('.oxd-dialog-sheet');
-      await expect(modal).toBeVisible();
+      await expect(modal).toBeVisible({ timeout: 15000 });
       await modal.getByRole('button', { name: 'No, Cancel' }).click();
       await expect(modal).not.toBeVisible();
 
       // Expected: Employee record remains intact in table grid
-      await expect(targetRow).toBeVisible();
+      await expect(targetRow).toBeVisible({ timeout: 15000 });
     } finally {
       // Clean up test employee
       await safeDeleteEmployeeById(page, testId);
@@ -997,15 +1027,15 @@ test.describe('Group 09 - 23130227 - Luu Quoc Phap - PIM: List Employees Test Su
 
     const headerCheckbox = page.locator('.oxd-table-header .oxd-checkbox-input');
     const firstRowCheckboxInput = page.locator('.oxd-table-card input[type="checkbox"]').first();
-    await expect(firstRowCheckboxInput).toBeVisible();
+    await expect(firstRowCheckboxInput).toBeVisible({ timeout: 15000 });
 
     // Step 1: Click header checkbox -> All rows selected
     await headerCheckbox.click();
-    await expect(firstRowCheckboxInput).toBeChecked();
+    await expect(firstRowCheckboxInput).toBeChecked({ timeout: 15000 });
 
     // Step 2: Click header checkbox again -> All rows deselected
     await headerCheckbox.click();
-    await expect(firstRowCheckboxInput).not.toBeChecked();
+    await expect(firstRowCheckboxInput).not.toBeChecked({ timeout: 15000 });
   });
 
   // --------------------------------------------------------------------------
@@ -1038,17 +1068,17 @@ test.describe('Group 09 - 23130227 - Luu Quoc Phap - PIM: List Employees Test Su
 
       // Click "Delete Selected" button
       const deleteSelectedBtn = page.getByRole('button', { name: /Delete Selected/i });
-      await expect(deleteSelectedBtn).toBeVisible();
+      await expect(deleteSelectedBtn).toBeVisible({ timeout: 15000 });
       await deleteSelectedBtn.click();
 
       // Confirm in modal
       const modal = page.locator('.oxd-dialog-sheet');
-      await expect(modal).toBeVisible();
+      await expect(modal).toBeVisible({ timeout: 15000 });
       await modal.getByRole('button', { name: 'Yes, Delete' }).click();
 
       // Expected: Toast "Successfully Deleted" appears
       const toast = page.locator('.oxd-toast');
-      await expect(toast).toContainText(/Successfully Deleted/i, { timeout: 10000 });
+      await expect(toast).toContainText(/Successfully Deleted/i, { timeout: 15000 });
     } else {
       // Fallback cleanup if search didn't match immediately
       await safeDeleteEmployeeById(page, id1);
