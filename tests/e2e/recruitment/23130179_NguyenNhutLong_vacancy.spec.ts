@@ -1,8 +1,8 @@
 import { test, expect, type Locator, type Page, type TestInfo } from '@playwright/test';
 
-const BASE = process.env.ORANGEHRM_BASE_URL ?? 'https://opensource-demo.orangehrmlive.com';
-const USERNAME = process.env.ORANGEHRM_USERNAME ?? 'Admin';
-const PASSWORD = process.env.ORANGEHRM_PASSWORD ?? 'admin123';
+const BASE = 'https://opensource-demo.orangehrmlive.com';
+const USERNAME = 'Admin';
+const PASSWORD = 'admin123';
 
 async function login(page: Page): Promise<void> {
   await page.goto('/web/index.php/auth/login');
