@@ -25,20 +25,50 @@ const PASSWORD = process.env.ORANGEHRM_PASSWORD ?? 'admin123';
  * Perform login if user is not already authenticated and on the dashboard.
  */
 async function login(page: Page): Promise<void> {
-  await page.goto(`${BASE_URL}/web/index.php/auth/login`);
-  
-  // If already redirected to dashboard
-  if (page.url().includes('/dashboard')) {
-    return;
+  const usernameInput = page.getByPlaceholder('Username');
+  const passwordInput = page.getByPlaceholder('Password');
+  const loginButton = page.getByRole('button', { name: 'Login' });
+
+  // The public demo site occasionally loads slowly or returns a temporary
+  // error page, so try to open the login form more than once before failing.
+  const maxAttempts = 2;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    await page.goto(`${BASE_URL}/web/index.php/auth/login`, { waitUntil: 'domcontentloaded' })
+      .catch(() => { /* retry below */ });
+
+    // Already authenticated (OrangeHRM redirects to the dashboard)
+    if (page.url().includes('/dashboard')) {
+      return;
+    }
+
+    let formReady = true;
+    try {
+      await usernameInput.waitFor({ state: 'visible', timeout: 25000 });
+    } catch {
+      formReady = false;
+    }
+
+    if (formReady) {
+      await usernameInput.fill(USERNAME);
+      await passwordInput.fill(PASSWORD);
+      await loginButton.click();
+      await expect(page).toHaveURL(/dashboard/, { timeout: 30000 });
+      return;
+    }
+
+    if (attempt < maxAttempts) {
+      await page.waitForTimeout(2000);
+    }
   }
 
-  // Wait for login form to render
-  const usernameInput = page.getByPlaceholder('Username');
-  await expect(usernameInput).toBeVisible({ timeout: 15000 });
+  // Final attempt: if the form appeared after the last retry, still log in;
+  // otherwise fail with a clear error message.
+  await expect(usernameInput).toBeVisible({ timeout: 30000 });
   await usernameInput.fill(USERNAME);
-  await page.getByPlaceholder('Password').fill(PASSWORD);
-  await page.getByRole('button', { name: 'Login' }).click();
-  await expect(page).toHaveURL(/dashboard/, { timeout: 25000 });
+  await passwordInput.fill(PASSWORD);
+  await loginButton.click();
+  await expect(page).toHaveURL(/dashboard/, { timeout: 30000 });
 }
 
 /**
@@ -121,7 +151,9 @@ async function fillAutocomplete(page: Page, label: string, hint: string, selectI
   const dropdown = page.locator('.oxd-autocomplete-dropdown');
   await expect(dropdown).toBeVisible({ timeout: 10000 });
 
-  const validOptions = dropdown.locator('.oxd-autocomplete-option').filter({ hasNotText: 'Searching' });
+  const validOptions = dropdown.locator('.oxd-autocomplete-option')
+    .filter({ hasNotText: 'Searching' })
+    .filter({ hasNotText: 'No Records Found' });
   await expect(validOptions.first()).toBeVisible({ timeout: 15000 });
 
   const chosenOption = validOptions.nth(selectIndex);
@@ -184,6 +216,17 @@ async function sortColumn(page: Page, columnName: string, order: 'Ascending' | '
 }
 
 /**
+ * Generate an employee ID with enough entropy to avoid collisions.
+ * The public demo DB is reset periodically and is shared by every browser
+ * project / worker, so short numeric IDs (e.g. 4 random digits) are unsafe.
+ */
+function uniqueEmployeeId(prefix: string): string {
+  const time = Date.now().toString(36).toUpperCase().slice(-6);
+  const rand = (Math.random().toString(36) + '000').slice(2, 5).toUpperCase();
+  return (prefix + time + rand).slice(0, 10);
+}
+
+/**
  * Create a temporary test employee for testing Edit / Delete / Bulk Delete workflows.
  */
 async function createTestEmployee(page: Page, id: string, firstName: string, lastName: string): Promise<void> {
@@ -214,13 +257,18 @@ async function safeDeleteEmployeeById(page: Page, empId: string): Promise<void> 
     await clickSearch(page);
 
     const row = page.locator('.oxd-table-card').filter({ hasText: empId }).first();
-    if (await row.isVisible({ timeout: 3000 })) {
-      await row.locator('.bi-trash').locator('..').click();
-      const modal = page.locator('.oxd-dialog-sheet');
-      await expect(modal).toBeVisible({ timeout: 10000 });
-      await modal.getByRole('button', { name: 'Yes, Delete' }).click();
-      await page.waitForLoadState('networkidle');
+    try {
+      // NB: isVisible({ timeout }) does not actually wait, so use waitFor.
+      await row.waitFor({ state: 'visible', timeout: 10000 });
+    } catch {
+      return; // Not found (already deleted or never created)
     }
+
+    await row.locator('.bi-trash').locator('..').click();
+    const modal = page.locator('.oxd-dialog-sheet');
+    await expect(modal).toBeVisible({ timeout: 10000 });
+    await modal.getByRole('button', { name: 'Yes, Delete' }).click();
+    await page.waitForLoadState('networkidle');
   } catch {
     // Ignore cleanup errors
   }
@@ -382,36 +430,57 @@ test.describe('Group 09 - 23130227 - Luu Quoc Phap - PIM: List Employees Test Su
   // [Employee-List-8]
   // --------------------------------------------------------------------------
   test('[Employee-List-8] Check search by valid exact Employee Name', async ({ page }) => {
-    await gotoEmployeeList(page);
+    // Create a dedicated employee so the test does not depend on demo data.
+    const testId = uniqueEmployeeId('M');
+    const firstName = 'Name' + testId;
+    const lastName = 'Search' + testId;
 
-    // Pick an existing employee name via autocomplete
-    const selectedName = await fillAutocomplete(page, 'Employee Name', 'a', 0);
-    await clickSearch(page);
+    try {
+      await createTestEmployee(page, testId, firstName, lastName);
+      await gotoEmployeeList(page);
 
-    // Expected: Table filters and shows matching record
-    const rows = page.locator('.oxd-table-card');
-    await expect(rows.first()).toBeVisible({ timeout: 15000 });
-    const firstNamePart = selectedName.split(' ')[0];
-    await expect(page.locator('.oxd-table-body')).toContainText(firstNamePart, { timeout: 15000 });
+      // Pick the exact employee name via autocomplete
+      const selectedName = await fillAutocomplete(page, 'Employee Name', firstName, 0);
+      await clickSearch(page);
+
+      // Expected: Table filters and shows matching record
+      const rows = page.locator('.oxd-table-card');
+      await expect(rows.first()).toBeVisible({ timeout: 15000 });
+      const firstNamePart = selectedName.split(' ')[0];
+      await expect(page.locator('.oxd-table-body')).toContainText(firstNamePart, { timeout: 15000 });
+    } finally {
+      await safeDeleteEmployeeById(page, testId);
+    }
   });
 
   // --------------------------------------------------------------------------
   // [Employee-List-9]
   // --------------------------------------------------------------------------
   test('[Employee-List-9] Check search by partial Employee Name using autocomplete hint popup', async ({ page }) => {
-    await gotoEmployeeList(page);
+    // Create a dedicated employee so a matching hint exists even if the
+    // shared demo DB has just been reset or modified by other users.
+    const testId = uniqueEmployeeId('P');
+    const firstName = 'Anton' + testId;
+    const lastName = 'Partial' + testId;
 
-    // Type partial string and select from hint
-    const selectedName = await fillAutocomplete(page, 'Employee Name', 'an', 0);
-    await clickSearch(page);
+    try {
+      await createTestEmployee(page, testId, firstName, lastName);
+      await gotoEmployeeList(page);
 
-    // Expected: Autocomplete populated into input, table filters matching record
-    const empNameInput = getGroup(page, 'Employee Name').locator('input');
-    const inputVal = await empNameInput.inputValue();
-    expect(inputVal.replace(/\s+/g, ' ').trim()).toBe(selectedName.replace(/\s+/g, ' ').trim());
+      // Type a partial string and select from the hint popup
+      const selectedName = await fillAutocomplete(page, 'Employee Name', firstName.slice(0, 2), 0);
+      await clickSearch(page);
 
-    const rows = page.locator('.oxd-table-card');
-    await expect(rows.first()).toBeVisible({ timeout: 15000 });
+      // Expected: Autocomplete populated into input, table filters matching record
+      const empNameInput = getGroup(page, 'Employee Name').locator('input');
+      const inputVal = await empNameInput.inputValue();
+      expect(inputVal.replace(/\s+/g, ' ').trim()).toBe(selectedName.replace(/\s+/g, ' ').trim());
+
+      const rows = page.locator('.oxd-table-card');
+      await expect(rows.first()).toBeVisible({ timeout: 15000 });
+    } finally {
+      await safeDeleteEmployeeById(page, testId);
+    }
   });
 
   // --------------------------------------------------------------------------
@@ -583,8 +652,17 @@ test.describe('Group 09 - 23130227 - Luu Quoc Phap - PIM: List Employees Test Su
     const dropdown = page.locator('.oxd-autocomplete-dropdown');
     try {
       await expect(dropdown).toBeVisible({ timeout: 10000 });
-      const option = dropdown.locator('.oxd-autocomplete-option').filter({ hasNotText: 'Searching' }).first();
-      if (await option.isVisible({ timeout: 4000 })) {
+      const option = dropdown.locator('.oxd-autocomplete-option')
+        .filter({ hasNotText: 'Searching' })
+        .filter({ hasNotText: 'No Records Found' })
+        .first();
+      let optionVisible = true;
+      try {
+        await option.waitFor({ state: 'visible', timeout: 4000 });
+      } catch {
+        optionVisible = false;
+      }
+      if (optionVisible) {
         await option.click();
         await clickSearch(page);
         await expect(page.locator('.oxd-table')).toBeVisible({ timeout: 15000 });
@@ -919,16 +997,38 @@ test.describe('Group 09 - 23130227 - Luu Quoc Phap - PIM: List Employees Test Su
   // [Employee-List-35]
   // --------------------------------------------------------------------------
   test('[Employee-List-35] Check clicking Edit icon (Pencil) navigates to Edit Personal Details screen of target employee', async ({ page }) => {
-    await gotoEmployeeList(page);
+    // Create a dedicated employee so the target row cannot disappear/changed
+    // by other users of the shared OrangeHRM demo site.
+    const testId = uniqueEmployeeId('5');
+    const firstName = 'Edit';
+    const lastName = 'NavTest' + testId;
 
-    // Locate first row and click pencil edit button
-    const firstRow = page.locator('.oxd-table-card').first();
-    const pencilBtn = firstRow.locator('.bi-pencil-fill').locator('..');
-    await pencilBtn.click();
+    try {
+      await createTestEmployee(page, testId, firstName, lastName);
 
-    // Expected: System navigates to Personal Details page
-    await expect(page).toHaveURL(/pim\/viewPersonalDetails\/empNumber\/\d+/, { timeout: 20000 });
-    await expect(page.getByRole('heading', { name: 'Personal Details' })).toBeVisible({ timeout: 15000 });
+      // Locate the target employee and click pencil edit button
+      await gotoEmployeeList(page);
+      await getGroup(page, 'Employee Id').locator('input').fill(testId);
+      await clickSearch(page);
+
+      const targetRow = page.locator('.oxd-table-card').filter({ hasText: testId }).first();
+      await expect(targetRow).toBeVisible({ timeout: 15000 });
+      await targetRow.locator('.bi-pencil-fill').locator('..').click();
+
+      // Expected: System navigates to Personal Details page of the target employee
+      await expect(page).toHaveURL(/pim\/viewPersonalDetails\/empNumber\/\d+/, { timeout: 30000 });
+
+      // The heading renders only after the personal details component has loaded,
+      // so wait for the page data first (the demo site can be slow).
+      await page.locator('.oxd-loading-spinner').first()
+        .waitFor({ state: 'detached', timeout: 30000 })
+        .catch(() => {});
+      await expect(page.locator('.orangehrm-main-title').first()).toHaveText('Personal Details', { timeout: 30000 });
+      await expect(page.locator('.orangehrm-firstname')).toHaveValue(firstName, { timeout: 30000 });
+    } finally {
+      // Clean up the temporary employee
+      await safeDeleteEmployeeById(page, testId);
+    }
   });
 
   // --------------------------------------------------------------------------
@@ -959,29 +1059,35 @@ test.describe('Group 09 - 23130227 - Luu Quoc Phap - PIM: List Employees Test Su
   // --------------------------------------------------------------------------
   test('[Employee-List-37] Check confirming delete in popup removes employee from DB and updates table grid', async ({ page }) => {
     // Create dedicated employee for deletion test
-    const testId = '8' + Math.floor(1000 + Math.random() * 9000);
+    const testId = uniqueEmployeeId('8');
     const testLast = 'DelTest' + testId;
-    await createTestEmployee(page, testId, 'Temp', testLast);
 
-    // Navigate to Employee List and search for created employee
-    await gotoEmployeeList(page);
-    await getGroup(page, 'Employee Id').locator('input').fill(testId);
-    await clickSearch(page);
+    try {
+      await createTestEmployee(page, testId, 'Temp', testLast);
 
-    const targetRow = page.locator('.oxd-table-card').filter({ hasText: testId }).first();
-    await expect(targetRow).toBeVisible({ timeout: 15000 });
+      // Navigate to Employee List and search for created employee
+      await gotoEmployeeList(page);
+      await getGroup(page, 'Employee Id').locator('input').fill(testId);
+      await clickSearch(page);
 
-    // Click Trash icon
-    await targetRow.locator('.bi-trash').locator('..').click();
+      const targetRow = page.locator('.oxd-table-card').filter({ hasText: testId }).first();
+      await expect(targetRow).toBeVisible({ timeout: 15000 });
 
-    // Confirm Delete
-    const modal = page.locator('.oxd-dialog-sheet');
-    await expect(modal).toBeVisible({ timeout: 15000 });
-    await modal.getByRole('button', { name: 'Yes, Delete' }).click();
+      // Click Trash icon
+      await targetRow.locator('.bi-trash').locator('..').click();
 
-    // Expected: Toast message "Successfully Deleted" appears and row removed
-    const toast = page.locator('.oxd-toast');
-    await expect(toast).toContainText(/Successfully Deleted/i, { timeout: 15000 });
+      // Confirm Delete
+      const modal = page.locator('.oxd-dialog-sheet');
+      await expect(modal).toBeVisible({ timeout: 15000 });
+      await modal.getByRole('button', { name: 'Yes, Delete' }).click();
+
+      // Expected: Toast message "Successfully Deleted" appears and row removed
+      const toast = page.locator('.oxd-toast');
+      await expect(toast).toContainText(/Successfully Deleted/i, { timeout: 15000 });
+    } finally {
+      // If the test failed before confirming, remove the leftover employee.
+      await safeDeleteEmployeeById(page, testId);
+    }
   });
 
   // --------------------------------------------------------------------------
@@ -989,11 +1095,12 @@ test.describe('Group 09 - 23130227 - Luu Quoc Phap - PIM: List Employees Test Su
   // --------------------------------------------------------------------------
   test('[Employee-List-38] Check canceling delete in popup keeps employee record intact in table grid', async ({ page }) => {
     // Create dedicated test employee
-    const testId = '7' + Math.floor(1000 + Math.random() * 9000);
+    const testId = uniqueEmployeeId('7');
     const testLast = 'KeepTest' + testId;
-    await createTestEmployee(page, testId, 'Temp', testLast);
 
     try {
+      await createTestEmployee(page, testId, 'Temp', testLast);
+
       // Navigate to Employee List and search
       await gotoEmployeeList(page);
       await getGroup(page, 'Employee Id').locator('input').fill(testId);
@@ -1044,43 +1151,47 @@ test.describe('Group 09 - 23130227 - Luu Quoc Phap - PIM: List Employees Test Su
   test('[Employee-List-40] Check bulk delete action when multiple checkboxes are selected', async ({ page }) => {
     test.slow();
 
-    // Create 2 temporary test employees for bulk deletion
-    const id1 = '6' + Math.floor(1000 + Math.random() * 9000);
-    const id2 = '6' + Math.floor(1000 + Math.random() * 9000);
-    const commonLast = 'Bulk' + Date.now().toString().slice(-4);
+    // Create 2 temporary test employees for bulk deletion.
+    // Use different prefixes so the two IDs can never collide.
+    const id1 = uniqueEmployeeId('A');
+    const id2 = uniqueEmployeeId('B');
+    const commonLast = 'Bulk' + Date.now().toString(36).toUpperCase().slice(-5) +
+      (Math.random().toString(36) + '00').slice(2, 4).toUpperCase();
 
-    await createTestEmployee(page, id1, 'UserA', commonLast);
-    await createTestEmployee(page, id2, 'UserB', commonLast);
+    try {
+      await createTestEmployee(page, id1, 'UserA', commonLast);
+      await createTestEmployee(page, id2, 'UserB', commonLast);
 
-    // Search by common last name
-    await gotoEmployeeList(page);
-    await getGroup(page, 'Employee Name').locator('input').fill(commonLast);
-    await page.waitForTimeout(500);
-    await clickSearch(page);
+      // Search by common last name
+      await gotoEmployeeList(page);
+      await getGroup(page, 'Employee Name').locator('input').fill(commonLast);
+      await page.waitForTimeout(500);
+      await clickSearch(page);
 
-    // Check checkboxes of matching rows
-    const rows = page.locator('.oxd-table-card').filter({ hasText: commonLast });
-    const rowCount = await rows.count();
+      // Check checkboxes of matching rows
+      const rows = page.locator('.oxd-table-card').filter({ hasText: commonLast });
+      const rowCount = await rows.count();
 
-    if (rowCount >= 2) {
-      await rows.nth(0).locator('.oxd-checkbox-input').click();
-      await rows.nth(1).locator('.oxd-checkbox-input').click();
+      if (rowCount >= 2) {
+        await rows.nth(0).locator('.oxd-checkbox-input').click();
+        await rows.nth(1).locator('.oxd-checkbox-input').click();
 
-      // Click "Delete Selected" button
-      const deleteSelectedBtn = page.getByRole('button', { name: /Delete Selected/i });
-      await expect(deleteSelectedBtn).toBeVisible({ timeout: 15000 });
-      await deleteSelectedBtn.click();
+        // Click "Delete Selected" button
+        const deleteSelectedBtn = page.getByRole('button', { name: /Delete Selected/i });
+        await expect(deleteSelectedBtn).toBeVisible({ timeout: 15000 });
+        await deleteSelectedBtn.click();
 
-      // Confirm in modal
-      const modal = page.locator('.oxd-dialog-sheet');
-      await expect(modal).toBeVisible({ timeout: 15000 });
-      await modal.getByRole('button', { name: 'Yes, Delete' }).click();
+        // Confirm in modal
+        const modal = page.locator('.oxd-dialog-sheet');
+        await expect(modal).toBeVisible({ timeout: 15000 });
+        await modal.getByRole('button', { name: 'Yes, Delete' }).click();
 
-      // Expected: Toast "Successfully Deleted" appears
-      const toast = page.locator('.oxd-toast');
-      await expect(toast).toContainText(/Successfully Deleted/i, { timeout: 15000 });
-    } else {
-      // Fallback cleanup if search didn't match immediately
+        // Expected: Toast "Successfully Deleted" appears
+        const toast = page.locator('.oxd-toast');
+        await expect(toast).toContainText(/Successfully Deleted/i, { timeout: 15000 });
+      }
+    } finally {
+      // Best-effort cleanup if the search did not match or deletion failed.
       await safeDeleteEmployeeById(page, id1);
       await safeDeleteEmployeeById(page, id2);
     }

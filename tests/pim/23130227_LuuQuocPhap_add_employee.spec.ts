@@ -41,18 +41,50 @@ const OVERSIZED_IMAGE_BUFFER = Buffer.alloc(1.5 * 1024 * 1024);
  * Perform login if user is not already authenticated and on the dashboard.
  */
 async function login(page: Page): Promise<void> {
-  await page.goto(`${BASE_URL}/web/index.php/auth/login`);
+  const usernameInput = page.getByPlaceholder('Username');
+  const passwordInput = page.getByPlaceholder('Password');
+  const loginButton = page.getByRole('button', { name: 'Login' });
 
-  if (page.url().includes('/dashboard')) {
-    return;
+  // The public demo site occasionally loads slowly or returns a temporary
+  // error page, so try to open the login form more than once before failing.
+  const maxAttempts = 2;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    await page.goto(`${BASE_URL}/web/index.php/auth/login`, { waitUntil: 'domcontentloaded' })
+      .catch(() => { /* retry below */ });
+
+    // Already authenticated (OrangeHRM redirects to the dashboard)
+    if (page.url().includes('/dashboard')) {
+      return;
+    }
+
+    let formReady = true;
+    try {
+      await usernameInput.waitFor({ state: 'visible', timeout: 25000 });
+    } catch {
+      formReady = false;
+    }
+
+    if (formReady) {
+      await usernameInput.fill(USERNAME);
+      await passwordInput.fill(PASSWORD);
+      await loginButton.click();
+      await expect(page).toHaveURL(/dashboard/, { timeout: 30000 });
+      return;
+    }
+
+    if (attempt < maxAttempts) {
+      await page.waitForTimeout(2000);
+    }
   }
 
-  const usernameInput = page.getByPlaceholder('Username');
-  await expect(usernameInput).toBeVisible({ timeout: 15000 });
+  // Final attempt: if the form appeared after the last retry, still log in;
+  // otherwise fail with a clear error message.
+  await expect(usernameInput).toBeVisible({ timeout: 30000 });
   await usernameInput.fill(USERNAME);
-  await page.getByPlaceholder('Password').fill(PASSWORD);
-  await page.getByRole('button', { name: 'Login' }).click();
-  await expect(page).toHaveURL(/dashboard/, { timeout: 25000 });
+  await passwordInput.fill(PASSWORD);
+  await loginButton.click();
+  await expect(page).toHaveURL(/dashboard/, { timeout: 30000 });
 }
 
 /**
@@ -96,10 +128,46 @@ async function clearInput(locator: Locator): Promise<void> {
 }
 
 /**
- * Helper to generate a unique employee ID that avoids collisions in demo DB.
+ * Generate an employee ID with enough entropy to avoid collisions.
+ * The public demo DB is reset periodically and is shared by every browser
+ * project / worker, so short numeric IDs (e.g. '9' + 4 digits) are unsafe.
  */
-function uniqueEmployeeId(): string {
-  return '9' + Math.floor(1000 + Math.random() * 9000);
+function uniqueEmployeeId(prefix = 'E'): string {
+  const time = Date.now().toString(36).toUpperCase().slice(-6);
+  const rand = (Math.random().toString(36) + '000').slice(2, 5).toUpperCase();
+  return (prefix + time + rand).slice(0, 10);
+}
+
+/**
+ * Generate a unique username for [Create Login Details] tests.
+ */
+function uniqueUsername(): string {
+  const suffix = (Math.random().toString(36) + '0000').slice(2, 6);
+  return 'u' + Date.now().toString(36) + suffix;
+}
+
+/**
+ * Delete an employee by Employee Id from the Employee List.
+ */
+async function deleteEmployeeById(page: Page, empId: string): Promise<void> {
+  await page.goto(`${BASE_URL}/web/index.php/pim/viewEmployeeList`);
+
+  const idInput = getGroup(page, 'Employee Id').locator('input');
+  await idInput.fill(empId);
+  await page.getByRole('button', { name: 'Search' }).click();
+
+  const row = page.locator('.oxd-table-card').filter({ hasText: empId }).first();
+  try {
+    await row.waitFor({ state: 'visible', timeout: 15000 });
+  } catch {
+    return; // Employee was not created or is already deleted
+  }
+
+  await row.locator('.bi-trash').locator('..').click();
+  const modal = page.locator('.oxd-dialog-sheet');
+  await expect(modal).toBeVisible({ timeout: 15000 });
+  await modal.getByRole('button', { name: 'Yes, Delete' }).click();
+  await expect(page.locator('.oxd-toast')).toContainText(/Successfully Deleted/i, { timeout: 15000 });
 }
 
 // ==========================================
@@ -109,7 +177,7 @@ function uniqueEmployeeId(): string {
 test.describe.configure({ mode: 'serial' });
 
 test.describe('Group 09 - 23130227 - Luu Quoc Phap - PIM: Add Employee Test Suite', () => {
-  test.setTimeout(90000);
+  test.setTimeout(120000);
 
   test.beforeEach(async ({ page }) => {
     await login(page);
@@ -485,22 +553,48 @@ test.describe('Group 09 - 23130227 - Luu Quoc Phap - PIM: Add Employee Test Suit
   // [Employee-Add-22]
   // --------------------------------------------------------------------------
   test('[Employee-Add-22] Check adding employee with an existing [Employee Id] already in DB', async ({ page }) => {
-    await gotoAddEmployee(page);
+    // Create a dedicated employee first, so the duplicate Id is guaranteed to
+    // exist in the shared demo database (hard-coded Ids like '0001' may not).
+    const existingId = uniqueEmployeeId('I');
+    const existingLastName = 'IdTest' + existingId;
+    let created = false;
 
-    // Use a known existing employee ID (e.g., '0001' or '0002')
-    const idInput = getGroup(page, 'Employee Id').locator('input');
-    await clearInput(idInput);
-    await idInput.fill('0001');
+    try {
+      await gotoAddEmployee(page);
+      await page.getByPlaceholder('First Name').fill('Dup');
+      await page.getByPlaceholder('Last Name').fill(existingLastName);
+      const createIdInput = getGroup(page, 'Employee Id').locator('input');
+      await clearInput(createIdInput);
+      await createIdInput.fill(existingId);
+      await page.getByRole('button', { name: 'Save' }).click();
+      await expect(page).toHaveURL(/pim\/viewPersonalDetails\/empNumber\/\d+/, { timeout: 30000 });
+      created = true;
 
-    await page.getByPlaceholder('First Name').fill('Test');
-    await page.getByPlaceholder('Last Name').fill('Duplicate');
+      // Try to add another employee using the same Employee Id
+      await gotoAddEmployee(page);
+      const idInput = getGroup(page, 'Employee Id').locator('input');
+      await clearInput(idInput);
+      await idInput.fill(existingId);
 
-    await page.getByRole('button', { name: 'Save' }).click();
+      await page.getByPlaceholder('First Name').fill('Test');
+      await page.getByPlaceholder('Last Name').fill('Duplicate');
 
-    // Expected: Error message "Employee Id already exists" is displayed
-    const errorMsg = getGroup(page, 'Employee Id').locator('.oxd-input-field-error-message');
-    await expect(errorMsg).toBeVisible();
-    await expect(errorMsg).toHaveText('Employee Id already exists');
+      await page.getByRole('button', { name: 'Save' }).click();
+
+      // Expected: Error message "Employee Id already exists" is displayed
+      // and the user stays on the Add Employee screen.
+      const errorMsg = getGroup(page, 'Employee Id').locator('.oxd-input-field-error-message');
+      await expect(errorMsg).toBeVisible({ timeout: 20000 });
+      await expect(errorMsg).toHaveText('Employee Id already exists', { timeout: 20000 });
+      await expect(page).toHaveURL(/pim\/addEmployee/);
+    } finally {
+      // Only delete when this test actually created the employee. If creation
+      // failed because the Id already existed, deleting would remove someone
+      // else's record.
+      if (created) {
+        await deleteEmployeeById(page, existingId).catch(() => {});
+      }
+    }
   });
 
   // --------------------------------------------------------------------------
@@ -709,52 +803,64 @@ test.describe('Group 09 - 23130227 - Luu Quoc Phap - PIM: Add Employee Test Suit
   // [Employee-Add-34]
   // --------------------------------------------------------------------------
   test('[Employee-Add-34] Check saving employee successfully with valid mandatory fields and [Create Login Details] = OFF', async ({ page }) => {
-    await gotoAddEmployee(page);
+    const testId = uniqueEmployeeId('A');
 
-    const testId = uniqueEmployeeId();
-    await page.getByPlaceholder('First Name').fill('Auto');
-    await page.getByPlaceholder('Last Name').fill('Simple' + testId);
+    try {
+      await gotoAddEmployee(page);
 
-    const idInput = getGroup(page, 'Employee Id').locator('input');
-    await clearInput(idInput);
-    await idInput.fill(testId);
+      await page.getByPlaceholder('First Name').fill('Auto');
+      await page.getByPlaceholder('Last Name').fill('Simple' + testId);
 
-    // Click Save
-    await page.getByRole('button', { name: 'Save' }).click();
+      const idInput = getGroup(page, 'Employee Id').locator('input');
+      await clearInput(idInput);
+      await idInput.fill(testId);
 
-    // Expected: Redirects to Personal Details page
-    await expect(page).toHaveURL(/pim\/viewPersonalDetails\/empNumber\/\d+/, { timeout: 25000 });
-    await expect(page.getByRole('heading', { name: 'Personal Details' })).toBeVisible();
+      // Click Save
+      await page.getByRole('button', { name: 'Save' }).click();
+
+      // Expected: Redirects to Personal Details page
+      await expect(page).toHaveURL(/pim\/viewPersonalDetails\/empNumber\/\d+/, { timeout: 25000 });
+      await expect(page.getByRole('heading', { name: 'Personal Details' })).toBeVisible();
+    } finally {
+      // Remove the created employee so repeated runs do not fill the demo DB.
+      await deleteEmployeeById(page, testId).catch(() => {});
+    }
   });
 
   // --------------------------------------------------------------------------
   // [Employee-Add-35]
   // --------------------------------------------------------------------------
   test('[Employee-Add-35] Check saving employee successfully with valid fields and [Create Login Details] = ON', async ({ page }) => {
-    await gotoAddEmployee(page);
+    const testId = uniqueEmployeeId('L');
+    const uniqueUser = uniqueUsername();
 
-    const testId = uniqueEmployeeId();
-    const uniqueUser = 'user_' + Date.now().toString().slice(-6);
+    try {
+      await gotoAddEmployee(page);
 
-    await page.getByPlaceholder('First Name').fill('Login');
-    await page.getByPlaceholder('Last Name').fill('User' + testId);
+      await page.getByPlaceholder('First Name').fill('Login');
+      await page.getByPlaceholder('Last Name').fill('User' + testId);
 
-    const idInput = getGroup(page, 'Employee Id').locator('input');
-    await clearInput(idInput);
-    await idInput.fill(testId);
+      const idInput = getGroup(page, 'Employee Id').locator('input');
+      await clearInput(idInput);
+      await idInput.fill(testId);
 
-    // Turn ON login details
-    await setCreateLoginDetails(page, true);
-    await getGroup(page, 'Username').locator('input').fill(uniqueUser);
-    await getGroup(page, /^Password/).locator('input').fill('Admin@123456');
-    await getGroup(page, 'Confirm Password').locator('input').fill('Admin@123456');
+      // Turn ON login details
+      await setCreateLoginDetails(page, true);
+      await getGroup(page, 'Username').locator('input').fill(uniqueUser);
+      await getGroup(page, /^Password/).locator('input').fill('Admin@123456');
+      await getGroup(page, 'Confirm Password').locator('input').fill('Admin@123456');
 
-    // Save
-    await page.getByRole('button', { name: 'Save' }).click();
+      // Save
+      await page.getByRole('button', { name: 'Save' }).click();
 
-    // Expected: Employee record & User created, redirects to Personal Details
-    await expect(page).toHaveURL(/pim\/viewPersonalDetails\/empNumber\/\d+/, { timeout: 25000 });
-    await expect(page.getByRole('heading', { name: 'Personal Details' })).toBeVisible();
+      // Expected: Employee record & User created, redirects to Personal Details
+      await expect(page).toHaveURL(/pim\/viewPersonalDetails\/empNumber\/\d+/, { timeout: 25000 });
+      await expect(page.getByRole('heading', { name: 'Personal Details' })).toBeVisible();
+    } finally {
+      // Deleting the employee also removes the linked login user, keeping the
+      // shared demo DB clean and the generated username reusable.
+      await deleteEmployeeById(page, testId).catch(() => {});
+    }
   });
 
   // --------------------------------------------------------------------------
