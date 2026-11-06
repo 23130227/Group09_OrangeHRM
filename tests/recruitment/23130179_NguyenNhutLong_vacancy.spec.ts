@@ -70,21 +70,21 @@ async function selectJobTitle(page: Page, title: string): Promise<void> {
   await page.getByRole('option', { name: title, exact: true }).click();
 }
 
-async function pickHiringManager(page: Page, hint = 'Ranga'): Promise<string> {
+async function pickHiringManager(page: Page, hint = 'Chris'): Promise<string> {
   const input = group(page, 'Hiring Manager').locator('input');
-  const options = page.locator('.oxd-autocomplete-option').filter({ hasNotText: 'Searching' });
+  const options = page.locator('.oxd-autocomplete-option').filter({ hasNotText: /Searching|No Records Found/ });
 
   await input.fill(hint);
   try {
     await expect(options.first()).toBeVisible({ timeout: 8_000 });
   } catch {
-    await input.fill('a');
+    await input.fill('Chris');
     await expect(options.first()).toBeVisible();
   }
 
-  const selected = (await options.first().innerText()).trim();
+  const selected = (await options.first().innerText()).replace(/\s+/g, ' ').trim();
   await options.first().click();
-  await expect(input).not.toHaveValue('');
+  await expect(input).toHaveValue(new RegExp(selected.split(/\s+/)[0]));
   return selected;
 }
 
@@ -154,7 +154,7 @@ async function jobTitleOf(page: Page, name: string): Promise<string> {
 }
 
 async function hiringManagerOf(page: Page, name: string): Promise<string> {
-  return (await cell(page, name, 3).innerText()).trim();
+  return (await cell(page, name, 3).innerText()).replace(/\s+/g, ' ').trim();
 }
 
 async function statusOf(page: Page, name: string): Promise<string> {
@@ -164,7 +164,7 @@ async function statusOf(page: Page, name: string): Promise<string> {
 async function columnValues(page: Page, index: number): Promise<string[]> {
   return rows(page).evaluateAll(
     (tableRows, columnIndex) =>
-      tableRows.map((tableRow) => tableRow.querySelectorAll('[role=cell]')[columnIndex]?.textContent?.trim() ?? ''),
+      tableRows.map((tableRow) => tableRow.querySelectorAll('[role=cell]')[columnIndex]?.textContent?.replace(/\s+/g, ' ').trim() ?? ''),
     index,
   );
 }
@@ -177,7 +177,7 @@ async function selectFilter(page: Page, label: string, option: string): Promise<
 
   const exact = page.getByRole('option', { name: option, exact: true });
   if (await exact.count()) {
-    await exact.click();
+    await exact.first().click();
     return;
   }
 
@@ -298,7 +298,7 @@ test.describe('Recruitment — Vacancy Management', () => {
     await gotoAdd(page);
     await fillName(page, name);
     await selectJobTitle(page, 'Software Engineer');
-    await pickHiringManager(page, 'Ranga');
+    await pickHiringManager(page);
     await fillPositions(page, 5);
     await fillDescription(page, 'Vacancy created by Playwright');
     await saveAndExpectCreated(page);
@@ -324,7 +324,7 @@ test.describe('Recruitment — Vacancy Management', () => {
   test('recruitment-vacancy-2 | Tạo vacancy khi để trống Vacancy Name', async ({ page }) => {
     await gotoAdd(page);
     await selectJobTitle(page, 'Software Engineer');
-    await pickHiringManager(page, 'Ranga');
+    await pickHiringManager(page);
     await fillPositions(page, 2);
     await saveAndExpectError(page, 'Vacancy Name', 'Required');
   });
@@ -332,7 +332,7 @@ test.describe('Recruitment — Vacancy Management', () => {
   test('recruitment-vacancy-3 | Tạo vacancy khi để trống Job Title', async ({ page }, testInfo) => {
     await gotoAdd(page);
     await fillName(page, uniqueName('E2E-VAC-NOJOB', testInfo));
-    await pickHiringManager(page, 'Ranga');
+    await pickHiringManager(page);
     await fillPositions(page, 2);
     await saveAndExpectError(page, 'Job Title', 'Required');
   });
@@ -349,7 +349,7 @@ test.describe('Recruitment — Vacancy Management', () => {
     await gotoAdd(page);
     await fillName(page, uniqueName('E2E-VAC-POS0', testInfo));
     await selectJobTitle(page, 'Software Engineer');
-    await pickHiringManager(page, 'Ranga');
+    await pickHiringManager(page);
     await fillPositions(page, 0);
     await saveAndExpectError(page, 'Number of Positions', 'Should be a number between 1-99');
   });
@@ -358,7 +358,7 @@ test.describe('Recruitment — Vacancy Management', () => {
     await gotoAdd(page);
     await fillName(page, uniqueName('E2E-VAC-POSNEG', testInfo));
     await selectJobTitle(page, 'Software Engineer');
-    await pickHiringManager(page, 'Ranga');
+    await pickHiringManager(page);
     await fillPositions(page, -1);
     await saveAndExpectError(page, 'Number of Positions', 'Should be a numeric value');
   });
@@ -367,7 +367,7 @@ test.describe('Recruitment — Vacancy Management', () => {
     await gotoAdd(page);
     await fillName(page, uniqueName('E2E-VAC-POSABC', testInfo));
     await selectJobTitle(page, 'Software Engineer');
-    await pickHiringManager(page, 'Ranga');
+    await pickHiringManager(page);
     await fillPositions(page, 'abc');
     await saveAndExpectError(page, 'Number of Positions', 'Should be a numeric value');
   });
@@ -384,7 +384,7 @@ test.describe('Recruitment — Vacancy Management', () => {
     await gotoAdd(page);
     await fillName(page, name);
     await selectJobTitle(page, 'Software Engineer');
-    await pickHiringManager(page, 'Ranga');
+    await pickHiringManager(page);
     await fillPositions(page, 2);
     await setToggle(page, 'Active', false);
     await saveAndExpectCreated(page);
@@ -573,7 +573,7 @@ test.describe('Recruitment — Vacancy Management', () => {
     await gotoAdd(page);
     await fillName(page, cancelled);
     await selectJobTitle(page, 'Software Engineer');
-    await pickHiringManager(page, 'Ranga');
+    await pickHiringManager(page);
     await fillPositions(page, 2);
     await cancelForm(page);
 
@@ -585,7 +585,7 @@ test.describe('Recruitment — Vacancy Management', () => {
     await gotoAdd(page);
     await fillName(page, uniqueName('E2E-VAC-POS100', testInfo));
     await selectJobTitle(page, 'Software Engineer');
-    await pickHiringManager(page, 'Ranga');
+    await pickHiringManager(page);
     await fillPositions(page, 100);
     await saveAndExpectError(page, 'Number of Positions', 'Should be a number between 1-99');
   });
@@ -596,7 +596,7 @@ test.describe('Recruitment — Vacancy Management', () => {
     await gotoAdd(page);
     await fillName(page, closed.name);
     await selectJobTitle(page, 'Software Engineer');
-    await pickHiringManager(page, 'Ranga');
+    await pickHiringManager(page);
     await fillPositions(page, 2);
     await saveAndExpectError(page, 'Vacancy Name', 'Already exists');
   });
@@ -607,7 +607,7 @@ test.describe('Recruitment — Vacancy Management', () => {
     await gotoAdd(page);
     await fillName(page, name);
     await selectJobTitle(page, 'Software Engineer');
-    await pickHiringManager(page, 'Ranga');
+    await pickHiringManager(page);
     await fillPositions(page, 2);
     await setToggle(page, 'Publish in RSS', false);
     await saveAndExpectCreated(page);

@@ -1,8 +1,11 @@
 *.md
 *.zip
+*.log
+*.txt
 
 # Playwright
 node_modules/
+/test-artifacts/
 /test-results/
 /playwright-report/
 /blob-report/
