@@ -6,10 +6,29 @@ const PASSWORD = 'admin123';
 
 async function login(page: Page): Promise<void> {
   await page.goto('/web/index.php/auth/login');
-  await page.getByPlaceholder('Username').fill(USERNAME);
+  const username = page.getByPlaceholder('Username');
+  try {
+    await expect(username).toBeVisible({ timeout: 15_000 });
+  } catch {
+    const placeholders = await page
+      .locator('input')
+      .evaluateAll((elements) => elements.map((element) => element.getAttribute('placeholder')).filter(Boolean));
+    throw new Error(`Login page is not in English or did not load. Placeholders: ${placeholders.join(', ')}`);
+  }
+  await username.fill(USERNAME);
   await page.getByPlaceholder('Password').fill(PASSWORD);
   await page.getByRole('button', { name: 'Login' }).click();
   await expect(page).toHaveURL(/dashboard/);
+  try {
+    const response = await page.request.get('/web/index.php/api/v2/recruitment/vacancies?limit=1&offset=0');
+    if (response.status() === 403) {
+      throw new Error('Recruitment API returned 403. Enable the Recruitment module in Admin > Configuration > Modules, then rerun.');
+    }
+  } catch (error) {
+    if (error instanceof Error && error.message.includes('403')) {
+      throw error;
+    }
+  }
 }
 
 type VacancyRecord = {
@@ -382,22 +401,54 @@ async function columnValues(page: Page, index: number): Promise<string[]> {
   );
 }
 
+async function availableEmployeeHints(page: Page): Promise<string[]> {
+  try {
+    const response = await page.request.get('/web/index.php/api/v2/recruitment/interviewers?nameOrId=a');
+    if (!response.ok()) {
+      return [];
+    }
+    const payload = (await response.json()) as { data?: Array<{ firstName?: string; lastName?: string }> };
+    return [...new Set(
+      (payload.data ?? [])
+        .map((employee) => `${employee.firstName ?? ''} ${employee.lastName ?? ''}`.replace(/\s+/g, ' ').trim())
+        .filter(Boolean),
+    )];
+  } catch {
+    return [];
+  }
+}
+
+async function selectFirstJobTitle(page: Page): Promise<string> {
+  await group(page, 'Job Title').locator('.oxd-select-text').click();
+  const options = page.getByRole('option').filter({ hasNotText: '-- Select --' });
+  const title = (await options.first().innerText()).replace(/\s+/g, ' ').trim();
+  await page.getByRole('option', { name: title, exact: true }).click();
+  return title;
+}
+
 async function pickHiringManager(page: Page, hint = 'Amelia'): Promise<string> {
   const input = group(page, 'Hiring Manager').locator('input');
   const options = page.locator('.oxd-autocomplete-option').filter({ hasNotText: /Searching|No Records Found/ });
+  const candidates = [...new Set([hint, ...(await availableEmployeeHints(page)), 'Amelia', 'Chris', 'a'])];
 
-  await input.fill(hint);
-  try {
-    await expect(options.first()).toBeVisible({ timeout: 8_000 });
-  } catch {
-    await input.fill('Amelia');
-    await expect(options.first()).toBeVisible();
+  for (const candidate of candidates) {
+    if (!candidate) {
+      continue;
+    }
+    await input.fill(candidate);
+    try {
+      await expect(options.first()).toBeVisible({ timeout: 5_000 });
+    } catch {
+      continue;
+    }
+
+    const selected = (await options.first().innerText()).replace(/\s+/g, ' ').trim();
+    await options.first().click();
+    await expect(input).toHaveValue(new RegExp(selected.split(/\s+/)[0]));
+    return selected;
   }
 
-  const selected = (await options.first().innerText()).replace(/\s+/g, ' ').trim();
-  await options.first().click();
-  await expect(input).toHaveValue(new RegExp(selected.split(/\s+/)[0]));
-  return selected;
+  throw new Error('No hiring manager found in the demo. Check that the demo has employees.');
 }
 
 async function createVacancy(page: Page, name: string): Promise<VacancyRecord> {
@@ -405,15 +456,14 @@ async function createVacancy(page: Page, name: string): Promise<VacancyRecord> {
   await expect(page.getByText('Vacancy Name')).toBeVisible();
 
   await group(page, 'Vacancy Name').locator('input').fill(name);
-  await group(page, 'Job Title').locator('.oxd-select-text').click();
-  await page.getByRole('option', { name: 'Software Engineer', exact: true }).click();
+  const jobTitle = await selectFirstJobTitle(page);
   const hiringManager = await pickHiringManager(page);
   await group(page, 'Number of Positions').locator('input').fill('1');
 
   await page.getByRole('button', { name: 'Save' }).click();
   await expect(page).toHaveURL(/addJobVacancy\/\d+/);
 
-  return { name, jobTitle: 'Software Engineer', hiringManager };
+  return { name, jobTitle, hiringManager };
 }
 
 test.describe.configure({ mode: 'serial' });

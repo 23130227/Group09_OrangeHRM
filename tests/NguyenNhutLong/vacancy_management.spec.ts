@@ -6,10 +6,29 @@ const PASSWORD = 'admin123';
 
 async function login(page: Page): Promise<void> {
   await page.goto('/web/index.php/auth/login');
-  await page.getByPlaceholder('Username').fill(USERNAME);
+  const username = page.getByPlaceholder('Username');
+  try {
+    await expect(username).toBeVisible({ timeout: 15_000 });
+  } catch {
+    const placeholders = await page
+      .locator('input')
+      .evaluateAll((elements) => elements.map((element) => element.getAttribute('placeholder')).filter(Boolean));
+    throw new Error(`Login page is not in English or did not load. Placeholders: ${placeholders.join(', ')}`);
+  }
+  await username.fill(USERNAME);
   await page.getByPlaceholder('Password').fill(PASSWORD);
   await page.getByRole('button', { name: 'Login' }).click();
   await expect(page).toHaveURL(/dashboard/);
+  try {
+    const response = await page.request.get('/web/index.php/api/v2/recruitment/vacancies?limit=1&offset=0');
+    if (response.status() === 403) {
+      throw new Error('Recruitment API returned 403. Enable the Recruitment module in Admin > Configuration > Modules, then rerun.');
+    }
+  } catch (error) {
+    if (error instanceof Error && error.message.includes('403')) {
+      throw error;
+    }
+  }
 }
 
 type VacancyRecord = {
@@ -65,27 +84,60 @@ async function fillName(page: Page, name: string): Promise<void> {
   await group(page, 'Vacancy Name').locator('input').fill(name);
 }
 
-async function selectJobTitle(page: Page, title: string): Promise<void> {
+async function selectJobTitle(page: Page, preferred?: string, exclude?: string): Promise<string> {
   await group(page, 'Job Title').locator('.oxd-select-text').click();
+  const options = page.getByRole('option').filter({ hasNotText: '-- Select --' });
+  const titles = (await options.allTextContents()).map((value) => value.replace(/\s+/g, ' ').trim());
+  const title = preferred && titles.includes(preferred) && preferred !== exclude
+    ? preferred
+    : titles.find((value) => value !== exclude) ?? titles[0];
+  if (!title) {
+    throw new Error('No job titles available in the demo.');
+  }
   await page.getByRole('option', { name: title, exact: true }).click();
+  return title;
+}
+
+async function availableEmployeeHints(page: Page): Promise<string[]> {
+  try {
+    const response = await page.request.get('/web/index.php/api/v2/recruitment/interviewers?nameOrId=a');
+    if (!response.ok()) {
+      return [];
+    }
+    const payload = (await response.json()) as { data?: Array<{ firstName?: string; lastName?: string }> };
+    return [...new Set(
+      (payload.data ?? [])
+        .map((employee) => `${employee.firstName ?? ''} ${employee.lastName ?? ''}`.replace(/\s+/g, ' ').trim())
+        .filter(Boolean),
+    )];
+  } catch {
+    return [];
+  }
 }
 
 async function pickHiringManager(page: Page, hint = 'Chris'): Promise<string> {
   const input = group(page, 'Hiring Manager').locator('input');
   const options = page.locator('.oxd-autocomplete-option').filter({ hasNotText: /Searching|No Records Found/ });
+  const candidates = [...new Set([hint, ...(await availableEmployeeHints(page)), 'Amelia', 'Chris', 'a'])];
 
-  await input.fill(hint);
-  try {
-    await expect(options.first()).toBeVisible({ timeout: 8_000 });
-  } catch {
-    await input.fill('Chris');
-    await expect(options.first()).toBeVisible();
+  for (const candidate of candidates) {
+    if (!candidate) {
+      continue;
+    }
+    await input.fill(candidate);
+    try {
+      await expect(options.first()).toBeVisible({ timeout: 5_000 });
+    } catch {
+      continue;
+    }
+
+    const selected = (await options.first().innerText()).replace(/\s+/g, ' ').trim();
+    await options.first().click();
+    await expect(input).toHaveValue(new RegExp(selected.split(/\s+/)[0]));
+    return selected;
   }
 
-  const selected = (await options.first().innerText()).replace(/\s+/g, ' ').trim();
-  await options.first().click();
-  await expect(input).toHaveValue(new RegExp(selected.split(/\s+/)[0]));
-  return selected;
+  throw new Error('No hiring manager found in the demo. Check that the demo has employees.');
 }
 
 async function fillPositions(page: Page, value: string | number): Promise<void> {
@@ -297,7 +349,7 @@ test.describe('Recruitment — Vacancy Management', () => {
 
     await gotoAdd(page);
     await fillName(page, name);
-    await selectJobTitle(page, 'Software Engineer');
+    const jobTitle = await selectJobTitle(page, 'Software Engineer');
     await pickHiringManager(page);
     await fillPositions(page, 5);
     await fillDescription(page, 'Vacancy created by Playwright');
@@ -308,7 +360,7 @@ test.describe('Recruitment — Vacancy Management', () => {
     await expect(row(page, name)).toBeVisible();
 
     expect(await vacancyNameOf(page, name)).toBe(name);
-    expect(await jobTitleOf(page, name)).toBe('Software Engineer');
+    expect(await jobTitleOf(page, name)).toBe(jobTitle);
     expect(await hiringManagerOf(page, name)).not.toBe('');
     expect(await statusOf(page, name)).toBe('Active');
 
@@ -500,13 +552,13 @@ test.describe('Recruitment — Vacancy Management', () => {
     await gotoList(page);
     await searchByVacancy(page, primary.name);
     await editVacancy(page, primary.name);
-    await selectJobTitle(page, 'QA Engineer');
+    const newTitle = await selectJobTitle(page, undefined, primary.jobTitle);
     await saveAndExpectUpdated(page);
 
     await gotoList(page);
     await searchByVacancy(page, primary.name);
-    expect(await jobTitleOf(page, primary.name)).toBe('QA Engineer');
-    primary.jobTitle = 'QA Engineer';
+    expect(await jobTitleOf(page, primary.name)).toBe(newTitle);
+    primary.jobTitle = newTitle;
   });
 
   test('recruitment-vacancy-18 | Chỉnh sửa Number of Positions và lưu', async ({ page }) => {

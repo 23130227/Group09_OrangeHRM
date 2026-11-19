@@ -1,15 +1,35 @@
 import { test, expect, type Locator, type Page } from '@playwright/test';
 
+
 const BASE = 'https://opensource-demo.orangehrmlive.com';
 const USERNAME = 'Admin';
 const PASSWORD = 'admin123';
 
 async function login(page: Page): Promise<void> {
   await page.goto('/web/index.php/auth/login');
-  await page.getByPlaceholder('Username').fill(USERNAME);
+  const username = page.getByPlaceholder('Username');
+  try {
+    await expect(username).toBeVisible({ timeout: 15_000 });
+  } catch {
+    const placeholders = await page
+      .locator('input')
+      .evaluateAll((elements) => elements.map((element) => element.getAttribute('placeholder')).filter(Boolean));
+    throw new Error(`Login page is not in English or did not load. Placeholders: ${placeholders.join(', ')}`);
+  }
+  await username.fill(USERNAME);
   await page.getByPlaceholder('Password').fill(PASSWORD);
   await page.getByRole('button', { name: 'Login' }).click();
   await expect(page).toHaveURL(/dashboard/);
+  try {
+    const response = await page.request.get('/web/index.php/api/v2/recruitment/vacancies?limit=1&offset=0');
+    if (response.status() === 403) {
+      throw new Error('Recruitment API returned 403. Enable the Recruitment module in Admin > Configuration > Modules, then rerun.');
+    }
+  } catch (error) {
+    if (error instanceof Error && error.message.includes('403')) {
+      throw error;
+    }
+  }
 }
 
 type VacancyRecord = {
@@ -161,34 +181,79 @@ async function openProfileFromList(page: Page, name: string): Promise<void> {
   await waitForProfile(page);
 }
 
+async function availableEmployeeHints(page: Page): Promise<string[]> {
+  try {
+    const response = await page.request.get('/web/index.php/api/v2/recruitment/interviewers?nameOrId=a');
+    if (!response.ok()) {
+      return [];
+    }
+    const payload = (await response.json()) as { data?: Array<{ firstName?: string; lastName?: string }> };
+    return [...new Set(
+      (payload.data ?? [])
+        .map((employee) => `${employee.firstName ?? ''} ${employee.lastName ?? ''}`.replace(/\s+/g, ' ').trim())
+        .filter(Boolean),
+    )];
+  } catch {
+    return [];
+  }
+}
+
+async function selectFirstJobTitle(page: Page): Promise<string> {
+  await field(page, 'Job Title').locator('.oxd-select-text').click();
+  const options = page.getByRole('option').filter({ hasNotText: '-- Select --' });
+  const title = (await options.first().innerText()).replace(/\s+/g, ' ').trim();
+  await page.getByRole('option', { name: title, exact: true }).click();
+  return title;
+}
+
 async function pickHiringManager(page: Page, hint = 'Amelia'): Promise<string> {
   const input = field(page, 'Hiring Manager').locator('input');
   const options = page.locator('.oxd-autocomplete-option').filter({ hasNotText: /Searching|No Records Found/ });
+  const candidates = [...new Set([hint, ...(await availableEmployeeHints(page)), 'Amelia', 'Chris', 'a'])];
 
-  await input.fill(hint);
-  try {
-    await expect(options.first()).toBeVisible({ timeout: 8_000 });
-  } catch {
-    await input.fill('Amelia');
-    await expect(options.first()).toBeVisible();
+  for (const candidate of candidates) {
+    if (!candidate) {
+      continue;
+    }
+    await input.fill(candidate);
+    try {
+      await expect(options.first()).toBeVisible({ timeout: 5_000 });
+    } catch {
+      continue;
+    }
+
+    const selected = normalize(await options.first().innerText());
+    await options.first().click();
+    await expect(input).toHaveValue(new RegExp(selected.split(/\s+/)[0]));
+    return selected;
   }
 
-  const selected = normalize(await options.first().innerText());
-  await options.first().click();
-  await expect(input).toHaveValue(new RegExp(selected.split(/\s+/)[0]));
-  return selected;
+  throw new Error('No hiring manager found in the demo. Check that the demo has employees.');
 }
 
 async function pickInterviewer(page: Page, index: number, hint: string): Promise<string> {
   const input = page.getByPlaceholder('Type for hints...').nth(index);
   const options = page.locator('.oxd-autocomplete-option').filter({ hasNotText: /Searching|No Records Found/ });
+  const candidates = [...new Set([hint, ...(await availableEmployeeHints(page)), 'Amelia', 'Chris', 'a'])];
 
-  await input.fill(hint);
-  await expect(options.first()).toBeVisible();
-  const selected = normalize(await options.first().innerText());
-  await options.first().click();
-  await expect(input).toHaveValue(new RegExp(selected.split(/\s+/)[0]));
-  return selected;
+  for (const candidate of candidates) {
+    if (!candidate) {
+      continue;
+    }
+    await input.fill(candidate);
+    try {
+      await expect(options.first()).toBeVisible({ timeout: 5_000 });
+    } catch {
+      continue;
+    }
+
+    const selected = normalize(await options.first().innerText());
+    await options.first().click();
+    await expect(input).toHaveValue(new RegExp(selected.split(/\s+/)[0]));
+    return selected;
+  }
+
+  throw new Error('No interviewer found in the demo. Check that the demo has employees.');
 }
 
 async function createVacancy(page: Page): Promise<VacancyRecord> {
@@ -198,8 +263,7 @@ async function createVacancy(page: Page): Promise<VacancyRecord> {
   await expect(page.getByText('Vacancy Name')).toBeVisible();
 
   await field(page, 'Vacancy Name').locator('input').fill(name);
-  await field(page, 'Job Title').locator('.oxd-select-text').click();
-  await page.getByRole('option', { name: 'Software Engineer', exact: true }).click();
+  await selectFirstJobTitle(page);
   await pickHiringManager(page);
   await field(page, 'Number of Positions').locator('input').fill('1');
 
@@ -263,12 +327,23 @@ async function apiShortlist(page: Page, candidate: CandidateRecord): Promise<voi
 }
 
 async function interviewerEmpNumber(page: Page, hint = 'Amelia'): Promise<number> {
-  const response = await page.request.get(
-    `/web/index.php/api/v2/recruitment/interviewers?nameOrId=${encodeURIComponent(hint)}`,
-  );
-  const data = (await response.json()).data as Array<{ empNumber: number }>;
-  expect(data.length).toBeGreaterThan(0);
-  return data[0].empNumber;
+  const candidates = [...new Set([hint, ...(await availableEmployeeHints(page)), 'Amelia', 'Chris', 'a'])];
+  for (const candidate of candidates) {
+    if (!candidate) {
+      continue;
+    }
+    const response = await page.request.get(
+      `/web/index.php/api/v2/recruitment/interviewers?nameOrId=${encodeURIComponent(candidate)}`,
+    );
+    if (!response.ok()) {
+      continue;
+    }
+    const data = (await response.json()).data as Array<{ empNumber: number }>;
+    if (data.length > 0) {
+      return data[0].empNumber;
+    }
+  }
+  throw new Error('No interviewer employee found in the demo.');
 }
 
 async function apiSchedule(page: Page, candidate: CandidateRecord): Promise<number> {
